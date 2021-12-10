@@ -1,0 +1,429 @@
+---
+title: "Report of MA678 Midterm Project"
+author: "Lihao Liao"
+date: "`r format(Sys.time(), '%b %d, %Y')`" 
+link-citations: yes
+header-includes:
+- \usepackage{float}
+- \usepackage{mathtools}
+output: pdf_document
+bibliography: references.bib
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+library(SASxport)
+library(Hmisc)
+library(stats)
+library(sn)
+library(ggplot2)
+library(lattice)
+library(minpack.lm)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(corpcor)
+library(MASS)
+library(reshape)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(latex2exp)
+library(tidyverse)
+library(magrittr)
+library(lme4)
+library(skimr)
+library(data.table)
+library(lubridate)
+library(sjPlot)
+library(sjmisc)
+#library(arm)
+library(RLRsim)
+library(pbkrtest)
+
+opts_chunk$set(fig.cap="",
+               #fig.width=8, fig.height=6, 
+               #fig.path = "./old_sim_res_pics/",
+               #fig.pos = "H",
+               #out.extra = "",
+               dpi=1500,
+               warning = FALSE)
+set.seed(1)
+```
+
+
+
+
+
+
+
+## Abstract
+
+In this report, I have explored the distribution of ground-level Ozone concentrations at 89 different locations in the United States. Based on the exploratory data analysis and linear mixed-effect regression, I have discovered that the ground-level Ozone concentrations are strongly correlated with locations where they are measured and the time when they are measured. In addition, the NO3 concentrations also affect the ground-level Ozone concentrations. This has implications for the prediction of future ground-level Ozone concentrations.
+
+## Introduction 
+
+Ozone, as a natural substance, plays an important role in environmental sustainability [@staehelin2001ozone]. It can be used as a water disinfectant and natural pesticide in agriculture. However, ground-level ozone can have a harmful effect on humans since it is mostly formed of "fog". Ozone pollution has been found to be a major health hazard worldwide[@stathopoulou2008impact]. Daily temperatures, relative humidity, and wind speed can affect ozone levels. In general, warm dry weather is more conducive to ozone formation than cool wet weather. Wind can affect both the location and concentration of ozone pollution[@EPAReport]. United Environmental Protection Agency (EPA) considers anything over 70 ppb to be unhealthy for human health and welfare. Therefore, for this project, I decided to study the distribution of ground-level ozone in the last ten years (2011-2020) in the United States. The aim of this project is to build a multilevel model with ground-level ozone concentrations being the response and time, location, other air pollutants being predictors to predict the future distribution of ground-level ozone concentrations in the United States. In the rest of this article, Ozone concentrations indicate ground-level Ozone concentrations unless told otherwise.
+
+## Method
+
+
+### Data Cleaning and Processing
+The data used for analysis are ground-level ozone concentrations and concentrations of pollutants at more than 85 rural sites throughout the United States collected by United Environmental Protection Agency (EPA) from 2010 to 2021. All of the data were downloaded at [https://java.epa.gov/castnet/clearsession.do](https://java.epa.gov/castnet/clearsession.do). I have used two datasets for this study including the 8-hour daily maximum Ozone concentration data and the measured concentrations for each pollutant (such as SO2 and NO3) averaged over weekly. Since the concentrations of ground-level Ozone are mostly correlated to the man-made emissions of nitrogen oxides[@zhang2019ozone; @stathopoulou2008impact], I have decided to only keep variables of locations of monitor site, date, and concentration of NO3 (Nitrogen Oxidation 3) for the data of concentrations for pollutants. These two data were merged by monitor sites and the time when they were collected, which were represented by year and week number in the year. Since there was no information on the week in which the concentrations of Ozone was measured, I have first converted the original date variable ("DDATE") into a format of date in R language and then convert it into the number of weeks. In addition, ground-level ozone concentrations are heavily affected by temperature and humidity[@zhang2019ozone; @stathopoulou2008impact], which is why ground-level ozone concentrations are also found to be seasonal. Therefore, I have created another variable, named Season, to indicate the season when the ozone concentrations and NO3 were measured based on the date of measurement. Further, since we would like to study the effect of time (year) on the ozone concentrations and predict the pattern of ozone concentrations in the future, we decided to create another variable, named "yeard10", which indicates the difference of year observed from the year 2010. For instance, $yeard10 = 1$ for year 2011. Thus, the final study data contain variables of monitor location, year, year increased from 2010, season, week, day, ozone concentrations, and NO3 concentrations.
+
+There are a total of 336704 observations in the original dataset of ozone concentrations and a total of 54847 observations in the data of pollutants concentrations. After merging the two datasets, there are a total of 323528 observations in the joint data. There are a few missing data (n=6705). Since there were no particular patterns for the missing data and the amount of missing data is relative smaller given the sample size, I decided to remove them from the study data. Further, since the data for 2021 were not complete yet, I decided to remove the data in 2021 and use the rest of the observations, which are measured in the year 2010-2020, to train (build) the model. There are a total of 296274 observations in the training set that were collected from 89 monitor sites for 3998 different days from 2010-2020.
+
+```{r, echo=F, message=F, warning=F, include=T}
+ozone = read.csv("./data/Ozone 8-Hour Daily Max.csv", header = T)
+ozone=ozone %>% 
+  mutate(ozone= as.numeric(OZONE_8HR_DAILY_MAX))%>% 
+  dplyr::select(SITE_ID, YEAR, DDATE, ozone) 
+
+other = read.csv("./data/Concentration - Weekly.csv", header = T)
+other = other %>% 
+  mutate(NO3 = NO3_CONC) %>% 
+  dplyr::select(SITE_ID, YEAR, WEEK, NO3) 
+
+#dim(other)
+
+
+```
+
+
+```{r, echo=F, warning=F, message=F, include=F}
+ozone = ozone %>% 
+  mutate(WEEK =week(parse_date_time(DDATE, orders = "mdy HMS")),
+         date =parse_date_time(DDATE, orders = "mdy HMS") )
+
+#### merge two datasets ########
+dat = merge(ozone, other, by=c("SITE_ID", "YEAR", "WEEK"))
+
+
+##### create variable season based on date ####
+
+### define the time for each season
+d = function(month_day) which(lut$month_day == month_day)
+lut = data.frame(all_dates = as.POSIXct("2012-1-1") + ((0:365) * 3600 * 24),
+                 season = NA)
+lut = within(lut, { month_day = strftime(all_dates, "%b-%d") })
+lut[c(d("Jan-01"):d("Mar-20"), d("Dec-21"):d("Dec-31")), "season"] = "winter"
+lut[c(d("Mar-21"):d("Jun-20")), "season"] = "spring"
+lut[c(d("Jun-21"):d("Sep-20")), "season"] = "summer"
+lut[c(d("Sep-21"):d("Dec-20")), "season"] = "autumn"
+rownames(lut) = lut$month_day
+
+### create the seaon variable
+dat = dat %>% 
+  mutate(Season = lut[strftime(parse_date_time(DDATE, orders = "mdy HMS"), "%b-%d"), "season"]  ) %>% 
+  mutate(yeard10 = YEAR-2010) %>% 
+  na.omit()
+  
+#### split data ########
+
+train = dat %>% 
+  filter(!YEAR==2021)
+test =dat %>% 
+  filter(YEAR==2021)
+
+```
+
+
+
+### Exploratory Data Analysis
+
+The average Ozone concentration across all the monitor sites from the year 2010 to 2020 is 41.265. The spread of the Ozone concentrations is large (variance = 135.93). The overall average and median value of Ozone concentration across all the monitor sites have decreased since 2010 (See Figure 1a). Similarly, the overall average and median value of NO3 concentration across all the monitor sites have also decreased since 2010 (See Figure 1b). Since there were a total of 89 monitor sites included in the data, it will make the plot too complicated if we plot them all. Thus, I have decided to randomly select 10 monitor sites and plot the Ozone distribution only at the selected sites for the purpose of simplicity. As we can see from Figure 3, the distribution of Ozone concentrations is quite different among the 10 selected sites. For each site, the ozone concentration tends to increase and then decrease over time (week), which can be partially explained by the fact the ground-level ozone concentrations typically are high on hot days, which are the middle of the year for most locations.
+Further, the distribution of Ozone concentrations over Week is not a straight line, which suggests a non-linear association or/and possible interaction with confounders. From Figure 3, we can see that the distributions of Ozone concentrations at the selected monitor sites are different in different seasons. Ozone concentrations tend to be higher in Summer and Fall than they are in Spring and Winter, which is reasonable since Ozone concentrations are usually higher when the temperature is high. Thus, we suspect that there might be an interaction effect between Season and Week on the Ozone concentrations. The scatter plot of Ozone and NO3 concentrations across 10 years (2010-2020) for the selected locations (See Figure 4) suggests that there might be a positive linear association between them.
+
+```{r tb1, echo=F, warning=F, message=F, eval=F}
+
+summary_fun = function(x){
+  mean = mean(x,na.rm=T)
+  median = median(x,na.rm=T)
+  var = var(x,na.rm=T)
+  q1 = quantile(x, probs= 0.025,na.rm=T)
+  q2 = quantile(x, probs= 0.975,na.rm=T)
+  min = min(x,na.rm=T)
+  max = max(x,na.rm=T)
+  res = round(c(mean, median,var, q1, q2, min, max),3)
+  names(res) = c("Mean", "Median","Variance", "Q1", "Q2","Min","Max")
+  return(res)
+}
+summary= apply(train %>% dplyr::select(ozone, NO3, WEEK), 2,summary_fun) %>% 
+  as.data.frame()
+colnames(summary) = c("Ozone", "NO3","Week")
+kable(t(summary),caption = "Descriptive Data",booktabs = TRUE,escape = FALSE,linesep ="")%>%
+  kableExtra::kable_styling(latex_options="scale_down")
+
+
+```
+
+
+
+```{r p1, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Average OZONE concentration and NO3 concentrations across monitor locations from Year 2010 to Year 2020"}
+
+##### get the average over all locations for each year 
+mean_by_year= train %>% 
+  group_by(YEAR) %>% 
+  summarise(ozMean = mean(ozone, na.rm=T), ozmedian = median(ozone),
+            no3Mean = mean(NO3),no3Median = median(NO3)) %>% 
+  as.data.frame()
+ 
+
+p1 = ggplot(data= mean_by_year)+geom_line(aes(x=YEAR, y=ozMean, colour="Mean"),size=1)+
+  geom_line(data= mean_by_year, aes(x=YEAR, y=ozmedian, colour="Median"),size=1)+
+   theme(plot.title = element_text(size = 12, face = "bold"))+
+  labs(color='Legend') +#ylim(lower,upper)+
+  labs(x="Time(Year)",y="Concentrations",caption="(a)" )+
+  ggtitle("Ozone")+
+  theme(plot.title = element_text(size = 12, face = "bold"))+
+ theme(axis.text=element_text(size=10),axis.title=element_text(size=10,face="bold"),
+        plot.caption = element_text(size=10,face="bold",hjust = 0.5))+
+  guides(colour = guide_legend(nrow = 1))
+
+p2 = ggplot(data= mean_by_year)+geom_line(aes(x=YEAR, y=no3Mean, colour="Mean"),size=1)+
+  geom_line(data= mean_by_year, aes(x=YEAR, y=no3Median, colour="Median"),size=1)+
+   theme(plot.title = element_text(size = 12, face = "bold"))+
+  labs(color='Legend') +#ylim(lower,upper)+
+  labs(x="Time(Year)",y="Concentrations",caption="(b)") +
+  ggtitle("NO3")+
+  theme(plot.title = element_text(size = 12, face = "bold"))+
+  theme(axis.text=element_text(size=10),axis.title=element_text(size=10,face="bold"),
+        plot.caption = element_text(size=10,face="bold",hjust = 0.5))+
+  guides(colour = guide_legend(nrow = 1))
+
+get_legend<-function(plot){
+  tmp <- ggplot_gtable(ggplot_build(plot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+
+legend = get_legend(p1)
+
+p1 = p1+theme(legend.position="none")
+p2 = p2+theme(legend.position="none")
+
+grid.arrange(p1,p2,legend, ncol=2, nrow = 2,
+             layout_matrix = rbind(c(1,2), c(3,3)),
+             widths = c(2.7,2.7), heights = c(2.5, 0.5))
+
+
+
+```
+
+
+
+
+
+```{r p2, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Average Ozone concentrations across year over time at selected minitor sites"}
+### random select 10 locations for plot ###
+location = unique(dat$SITE_ID)
+set.seed(123)
+id = sample(1:89, 10)
+location.selected = location[id]
+
+################# trend of ozone over time at selected location average year #########
+train %>% 
+  filter(SITE_ID %in% location.selected) %>% 
+  group_by(SITE_ID, WEEK) %>% 
+  summarise(mean = mean(ozone)) %>% 
+  ggplot(aes(x= WEEK, y= mean,colour= "mean"), color= )+
+  geom_line()+
+  facet_wrap(~SITE_ID, ncol = 3)+
+  theme(legend.position="none")+
+  labs(y= "Concentrations", x= "Week")+
+  theme(plot.title = element_text(size = 12, face = "bold"))+
+  theme(axis.text=element_text(size=10),axis.title=element_text(size=10,face="bold"),
+        plot.caption = element_text(size=10,face="bold",hjust = 0.5))
+
+```
+
+
+
+```{r p3, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Boxplot of Ozone concentrations at each season for selected locations"}
+######### box plot over season at selected locations ##########
+train %>% 
+  filter(SITE_ID %in% location.selected) %>% 
+ggplot(aes(x=Season,y=ozone, color=Season))+
+  geom_boxplot(size=1)+ labs(y="Ozone concentrations", x=NULL)+
+  facet_wrap(~SITE_ID, ncol = 3)+
+  theme(axis.title.x=element_blank(),### remove xlab and ylab
+         axis.ticks.x=element_blank(),
+         axis.title.y=element_blank(),
+         axis.ticks.y=element_blank())
+
+```
+
+
+
+
+
+```{r p4, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Scatter plot Ozone and NO3 concentrations for selected locations"}
+########### scatter plot of ozone and no3 #########
+
+train %>% 
+  filter(SITE_ID %in% location.selected) %>% 
+  ggplot(aes(x= NO3, y= ozone, colour=SITE_ID))+geom_point()+
+  geom_smooth(method=lm, se=FALSE, fullrange=TRUE)+
+  facet_wrap(~YEAR, ncol = 3)+
+  labs(color='Monitor site')+
+  labs(y= "Ozone concentrations", x= "NO3 concentrations")+
+  theme(plot.title = element_text(size = 12, face = "bold"))+
+  theme(axis.text=element_text(size=10),axis.title=element_text(size=10,face="bold"),
+        plot.caption = element_text(size=10,face="bold",hjust = 0.5))
+
+
+```
+
+
+
+### Model Fitting
+
+Based on the exploratory data analysis results, I have decided to fit the study data using a linear mixed-effect regression model with Ozone concentrations being the response variable. Week, Season, Year different from 2010, NO3 concentrations, monitor sites, and the interaction term of Week and Season are included in the model as fixed effects. Further, to account for the correlation between Ozone concentrations measured at the same site, the monitor site is included as a random intercept. Similarly, Week is included as random effects to account for the correlation between Ozone concentrations measured within the same week. ANOVA test suggests that all the fixed effects are significant and thus are all included in the final model (See Table 2). Further, likelihood ratio tests for the random effect and the random intercept suggest that both of them are statistically significant at the confidence level of 0.05 (p_value $<0.001$). Therefore, the final model includes Week, Season, Year different from 2010, NO3 concentrations, monitor sites, and the interaction term of Week and Season as fixed effects. Week and monitor sites are included as random effects.
+
+```{r tb2, echo=F, warning=F, message=F, include=T}
+m1 = lmer(ozone~ SITE_ID + WEEK*Season + NO3 + yeard10 +(1+ WEEK|SITE_ID), data = train,REML = FALSE)
+
+m2 = lmer(ozone~ SITE_ID + WEEK*Season + NO3 + yeard10 +(1|SITE_ID), data = train,REML = FALSE)
+
+tb.anova = anova(m1) %>% 
+  mutate(Pvalue =rep("$<0.001$", 6)) %>% 
+  as.data.frame() 
+
+rownames(tb.anova) = c("Mointor sites", "Week", "Season", "NO3 Concentrations", "Year", "Week:Season")
+kable(tb.anova, booktabs = TRUE,escape = FALSE, linesep ="",
+      caption = "ANOVA table of the fixed effects") %>%
+  kableExtra::kable_styling(full_width = F,latex_options="hold_position")
+
+# train = train %>% 
+#   mutate(WEEK2 = WEEK*WEEK)
+# m3 = lmer(ozone~ SITE_ID + WEEK+WEEK2+ Season + NO3 + yeard10 +(1+ WEEK|SITE_ID), data = train,REML = FALSE)
+# anova(m3)
+```
+
+```{r, echo=F, warning=F, message=F, include=F}
+anova(m1, m2)
+```
+
+
+## Result
+
+The detailed results of the final model can be found in Appendix. Week, year difference, and NO3 concentrations are all found to be negatively associated with Ozone concentrations. That is probably caused by a very large fixed intercept of the final model, which is over 60. In addition, the ozone concentrations are the highest in Fall compared to the other 3 seasons, while holding everything else the same. From the plot of random effects (see Figure 5), we can see that the random intercept for each monitor site is quite different from each other, while the random effect of Week seems not to be very noticeable. Figure 6 shows fitted Ozone concentrations with respect to different predictors and $95\%$ confidence interval (shaded area in the plot) according to the proposed model. The prediction plots are consistent with the estimated regression effects we have seen in the model. With one unit increase in SO3 concentrations, the the predicted Ozone concentrations will decrease by $-1.255$ units. During Fall, the Ozone concentrations will decrease by 0.565 units (ppb) every one week. 
+
+## Discussion
+
+The estimated coefficients of fixed effect Week and NO3 concentrations are different from what we have seen in the explanatory data analysis. NO3 concentrations seem to be positively associated with Ozone concentrations at some monitor sites in the explanatory data analysis while NO3 concentrations are found to be negatively associated with Ozone concentrations in the proposed model. This actually reasonable since the marginal effect of NO3 can be different than the conditional effect of it while conditioning on other predictors. However, the linear mixed-effect regression does not perform well when it comes to nonlinear relationships between Week and Ozone concentrations. Further study can be conducted on models and methods for the nonlinear relationship between Week and Ozone concentrations. In addition, since the Ozone concentrations are densely measured over time, instead of longitudinal data, we could actually view Ozone concentrations as a functional covariate of time (Week or day) in a future study. 
+
+The variable, Season, is included in the model for accounting for the effect of temperature and humidity on Ozone concentrations[@zhang2019ozone; @stathopoulou2008impact]. However, it might not be a very accurate indicator of temperature and humidity since whether varies, especially under the current situation of climate change. Information on temperature and humidity might be needed for future study.
+
+
+```{r p5, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Random Effects of the final model"}
+
+plot_model(m1, type = "re")
+#tab_model(m1)
+```
+
+
+
+
+```{r p6, echo=F, message=F,out.width="50%",out.height="50%",fig.align='center',fig.cap="Prediction plot"}
+library(patchwork)
+p1 = plot_model(m1, type = "eff", terms = "WEEK")
+p2 = plot_model(m1, type = "eff", terms = "yeard10")
+p3 = plot_model(m1, type = "eff", terms = c("WEEK","Season"))
+p4 = plot_model(m1, type = "eff", terms = "NO3")
+(p1+p2)/(p3+p4)
+
+#plot_model(m3, type = "pred", terms = c("WEEK","WEEK2"))
+# plot_model(m1, type = "pred", terms = c("WEEK","Season"))
+# 
+# plot_model(m1, type = "pred", terms = c("WEEK"))
+# 
+# plot_model(m1, type = "pred", terms = c("NO3_CONC"))
+
+```
+
+
+
+
+## Reference
+
+<div id="refs"></div>
+
+\newpage
+## Appendix
+### More EDA
+
+```{r, echo=F, warning=F, message=F,fig.align='center',fig.cap="Histogram of average ozone across locations for each year"}
+
+### histogram of average ozone across locations for each year 
+mean_by_location = train %>% 
+  group_by(SITE_ID, YEAR) %>% 
+  summarise(oz = mean(ozone), no3 = mean(NO3))
+
+mean_by_location %>% 
+  ggplot(aes(x= oz))+
+   geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, fill="#FF6666")+
+  facet_wrap(~YEAR, ncol = 3)
+  
+  
+```
+
+```{r, echo=F, warning=F, message=F,fig.align='center',fig.cap="box plot over season for  each year"}
+
+# ######### box plot over season for  each year ##########
+train %>%
+ggplot(aes(x=Season,y=ozone, color=Season))+
+  geom_boxplot(size=1)+ labs(y="Ozone concentrations")+
+  facet_wrap(~YEAR, ncol = 3)+
+  theme(axis.title.x=element_blank(),### remove xlab and ylab
+         axis.ticks.x=element_blank(),
+         axis.title.y=element_blank(),
+         axis.ticks.y=element_blank(),
+         axis.text=element_blank())
+
+```
+
+
+```{r, echo=F, message=F,fig.align='center',fig.cap="Average Ozone and NO3 concentrations across locations over time from 2010 to 2020"}
+
+################# average ozone and no3 across locations over year #########
+train %>% 
+  ggplot(aes(x= WEEK, y= ozone, group=SITE_ID,  colour="ozone"))+geom_line()+
+  geom_line(aes(x= WEEK, y= NO3, colour="NO3"))+
+  facet_wrap(~YEAR, ncol = 3)+
+  labs(y= "Concentrations", x= "Week")+
+  theme(plot.title = element_text(size = 12, face = "bold"))+
+  theme(axis.text=element_text(size=10),axis.title=element_text(size=10,face="bold"),
+        plot.caption = element_text(size=10,face="bold",hjust = 0.5))
+
+
+
+```
+
+### model checking: residual plot 
+```{r}
+plot(m1)
+```
+
+\newpage
+
+### Full model results
+```{r, echo=F, warning=F, message=F}
+tb = summary(m1)$coefficients %>% 
+  as.data.frame()
+rownames(tb)[2:89] = location
+kable(tb,caption = "Final Model selected",booktabs = TRUE,escape = FALSE,linesep ="")%>%
+  kableExtra::kable_styling(full_width = F,latex_options = "HOLD_position") %>%
+  kableExtra::add_footnote(c("*.Fall is the reference level of Season",
+                 "*. yeard10 represents the differernces in year compared to year 2010"),
+               notation = "symbol")
+
+```
+
+
+
